@@ -29,7 +29,9 @@ A forma mais segura e recomendada de usar esta ferramenta é clonando o reposit�
 **1. Clone o Repositório**
 
 ```
-git clone [https://github.com/adrielso/ServerPerfTool.git](https://github.com/adrielso/ServerPerfTool.git)
+git clone https://github.com/adrielso/ServerPerfTool.git
+```
+```
 cd ServerPerfTool
 ```
 
