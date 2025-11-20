@@ -1,11 +1,15 @@
 #!/bin/bash
 
+# Este script realiza benchmarks de performance para CPU, Memória e I/O de Disco.
+# As melhorias incluem: tratamento de interrupções (trap/cleanup), normalização
+# das unidades de velocidade (MB/s) para cálculo preciso de média, uso do
+# jq para parsing robusto de JSON, se disponível, e coleta de metadados OS/Target.
+
 # --- CORREÇÃO DE LOCALE ---
 # FORÇA O PONTO (.) COMO SEPARADOR DECIMAL PARA GARANTIR CÁLCULOS CORRETOS NO AWK.
 export LC_NUMERIC="C"
 
-# --- CONFIGURAÇÕES DO SERVIÇO DE UPLOAD ---
-# ATUALIZADO: URLs agora sem .php (URLs amigáveis)
+# --- CONFIGURAÇÕES DO SERVIÇO de UPLOAD ---
 API_URL="https://adrielso.tec.br/perf/upload_api"
 VIEWER_URL="https://adrielso.tec.br/perf/view"
 
@@ -19,7 +23,7 @@ FILE_NAME="testfile_${FILE_SIZE_MB}MB"
 
 # Teste de CPU
 # Valor ajustado para 600 iterações para garantir um tempo de execução estável e preciso.
-ITERATIONS=600 
+ITERATIONS=600
 CPU_CORES=$(nproc)
 
 # Teste de Memória (Memória Compartilhada / RAM)
@@ -28,6 +32,11 @@ FILE_SIZE_MEM_MB=512
 # Arquivo de Log (criado dinamicamente para garantir unicidade)
 LOG_FILE="performance_log_$(date +%Y%m%d_%H%M%S).log"
 
+# Variáveis globais para armazenar metadados
+LOCAL_HOSTNAME=""
+OS_INFO=""
+SCRIPT_TARGET="Linux" # Variável de filtro para distinguir ambientes (Linux vs. Windows)
+
 # Arrays para armazenar resultados numéricos para cálculo de média
 CPU_SINGLE_TIMES=()
 CPU_MULTI_TIMES=()
@@ -35,11 +44,32 @@ RAM_WRITE_SPEEDS=()
 DISK_ROOT_WRITE_SPEEDS=()
 DISK_ROOT_READ_SPEEDS=()
 
+# --- Função de Limpeza de Emergência (Clean-up) ---
+# Garante que arquivos temporários sejam removidos em caso de interrupção (Ctrl+C).
+function cleanup() {
+    echo ""
+    echo "⚠️ SCRIPT INTERROMPIDO. Limpando arquivos temporários..." >&2 # Direciona para stderr
+    rm -f /dev/shm/ramtest.tmp
+    # Tenta remover o arquivo de teste no diretório atual e no raiz (se for o caso)
+    rm -f "${FILE_NAME}"
+    if [ -f "/${FILE_NAME}" ]; then
+        rm -f "/${FILE_NAME}"
+    fi
+    # Tenta fechar o descritor de arquivo 3 (usado para logging) se estiver aberto
+    exec 3>&- 2>/dev/null
+    exit 1
+}
+
+# Configura o trap para chamar 'cleanup' em sinais de interrupção, etc.
+trap cleanup SIGINT SIGTERM SIGHUP
+
+# --- Funções Auxiliares (Não alteradas) ---
+
 # Função auxiliar para calcular a média de um array de números de ponto flutuante
 function calculate_average() {
     local results=("$@")
     if [ ${#results[@]} -eq 0 ]; then
-        echo "0"
+        echo "0.000"
         return
     fi
     # Usa 'awk' para somar todos os valores e dividir, formatando para três casas decimais.
@@ -47,14 +77,48 @@ function calculate_average() {
     awk "BEGIN { sum = 0; count = 0; for (i=1; i<=ARGC; i++) { sum += ARGV[i]; count++; } printf \"%.3f\", sum / count }" "${results[@]}"
 }
 
-# --- Funções de Logging e Tabela ---
+# FUNÇÃO ATUALIZADA: Extrai a velocidade de I/O e normaliza para MB/s
+function extract_speed_mbps() {
+    local speed_output="$1"
+    # Awk detecta a unidade (kB/s, MB/s, GB/s, TB/s) e converte tudo para MB/s.
+    echo "$speed_output" | awk '
+    {
+        for(i=1; i<=NF; i++) {
+            # Verifica se o campo é uma unidade de velocidade (ex: 'kB/s', 'MB/s')
+            if ($i ~ /B\/s/) {
+                val = $(i-1);
+                unit = $i;
+
+                # Converte para a unidade base MB/s
+                if (unit == "kB/s") {
+                    printf "%.3f", val / 1024;
+                    exit;
+                } else if (unit == "MB/s") {
+                    printf "%.3f", val;
+                    exit;
+                } else if (unit == "GB/s") {
+                    printf "%.3f", val * 1024;
+                    exit;
+                } else if (unit == "TB/s") {
+                    printf "%.3f", val * 1024 * 1024;
+                    exit;
+                }
+            }
+        }
+        # Retorna 0.000 se a velocidade não for encontrada/válida
+        print "0.000"
+    }'
+}
+
+
+# --- Funções de Logging e Tabela (Inalteradas) ---
 
 # Redireciona toda a saída (stdout e stderr) para o arquivo de log e para a tela
 function start_logging() {
     echo "--- ⏱️ Iniciando Testes de Performance Padrão em $(date) ---"
     echo "Log de saída sendo escrito em: $LOG_FILE"
     echo ""
-    # Esta linha redireciona a saída do script para o log e para a tela
+    # Redireciona a saída do script para o log e para a tela
     exec > >(tee -a "$LOG_FILE") 2>&1
 }
 
@@ -73,12 +137,30 @@ function print_performance_table() {
 
 # --- Funções de Teste ---
 
+# FUNÇÃO ATUALIZADA: Adiciona Hostname, OS e SCRIPT_TARGET
 function collect_system_info() {
     echo "### 🖥️ Informações do Sistema Coletadas ###"
-    # ATUALIZADO: Adicionado Hostname
+    # Popula a variável global LOCAL_HOSTNAME
     LOCAL_HOSTNAME=$(hostname)
     echo "Hostname: $LOCAL_HOSTNAME"
     
+    echo ""
+    echo "--- Sistema Operacional e Ambiente ---"
+    # Popula a variável global SCRIPT_TARGET
+    # Usado para que o visualizador possa distinguir entre Linux e Windows (futuro)
+    echo "Target Script Environment: $SCRIPT_TARGET" 
+    
+    # Popula a variável global OS_INFO
+    if [ -f /etc/os-release ]; then
+        # Extrai o nome amigável (Pretty Name)
+        OS_INFO=$(grep PRETTY_NAME /etc/os-release | sed 's/PRETTY_NAME=//g' | tr -d '"' | head -n 1)
+    else
+        # Fallback para o kernel e versão
+        OS_INFO=$(uname -s -r)
+    fi
+    echo "OS: $OS_INFO"
+
+    echo ""
     echo "--- CPU ---"
     CPU_MODEL=$(lscpu | grep 'Model name' | sed 's/Model name:[[:space:]]*//' | head -n 1)
     echo "Modelo da CPU: $CPU_MODEL"
@@ -96,14 +178,13 @@ function collect_system_info() {
         if [ "$TYPE" = "disk" ]; then
             echo "• DISCO: $NAME ($MODEL) - Tamanho: $SIZE"
         elif [ "$TYPE" = "part" ] && [ ! -z "$MOUNTPOINT" ] && [ "$MOUNTPOINT" != "[SWAP]" ]; then
-            echo "  └─ Montagem: $MOUNTPOINT - Partição: $NAME"
+            echo "  └─ Montagem: $MOUNTPOINT - Partição: $NAME"
         fi
     done
     
     echo "----------------------------------------"
 }
 
-# Função de teste de CPU intensiva
 function test_cpu_heavy() {
     local cpu_count=$CPU_CORES
     echo "### 🧠 Teste de Performance da CPU (Intensivo) ###"
@@ -127,7 +208,7 @@ function test_cpu_heavy() {
         TIME_MULTI_RAW=$( (TIMEFORMAT='%R'; time {
             for j in $(seq 1 $cpu_count); do
                 /bin/bash -c "$heavy_workload" &
-                PIDS+=($!) 
+                PIDS+=($!)
             done
             wait "${PIDS[@]}"
         }) 2>&1 | grep -oE '[0-9]+\.?[0-9]*' | head -n 1) # Filtra o número RAW
@@ -154,6 +235,7 @@ function test_cpu_heavy() {
     echo "----------------------------------------"
 }
 
+# FUNÇÃO ATUALIZADA: Agora usa a função extract_speed_mbps para garantir precisão
 function test_memory() {
     echo "### 💡 Teste de Performance da Memória RAM (Escrita Sequencial) ###"
     
@@ -164,9 +246,9 @@ function test_memory() {
         SPEED_OUTPUT=$(dd if=/dev/zero of=/dev/shm/ramtest.tmp bs=1M count="${FILE_SIZE_MEM_MB}" status=progress 2>&1 | tail -n 1)
         echo "$SPEED_OUTPUT"
 
-        # Extrai o valor numérico da velocidade (e ignora MB/s ou GB/s)
-        RAM_SPEED=$(echo "$SPEED_OUTPUT" | awk '{for(i=1; i<=NF; i++) { if($i ~ /B\/s/) { print $(i-1) } } }')
-        RAM_WRITE_SPEEDS+=("$RAM_SPEED")
+        # EXTRAÇÃO ATUALIZADA: Normaliza a velocidade para MB/s
+        RAM_SPEED_MBPS=$(extract_speed_mbps "$SPEED_OUTPUT")
+        RAM_WRITE_SPEEDS+=("$RAM_SPEED_MBPS")
         
         rm -f /dev/shm/ramtest.tmp
         echo "Arquivo de teste em RAM removido."
@@ -176,6 +258,7 @@ function test_memory() {
     echo "----------------------------------------"
 }
 
+# FUNÇÃO CORRIGIDA: Usa grep 'copied' | tail -n 1 para evitar poluição de dados I/O
 function run_io_test() {
     local mountpoint=$1
     local test_file="${mountpoint}/${FILE_NAME}"
@@ -191,15 +274,17 @@ function run_io_test() {
         echo "-- Rodada $i de $TEST_ROUNDS --"
         
         # --- Teste de Escrita ---
-        echo "Testando Escrita..."
-        WRITE_OUTPUT=$(dd if=/dev/zero of="${test_file}" bs=1M count="${FILE_SIZE_MB}" oflag=dsync status=progress 2>&1 | tail -n 1)
+        echo "Testando Escrita (com dsync)..."
+        # CORREÇÃO DE DD: Captura APENAS a linha de resumo (onde está a velocidade final)
+        WRITE_OUTPUT=$(dd if=/dev/zero of="${test_file}" bs=1M count="${FILE_SIZE_MB}" oflag=dsync 2>&1 | grep 'copied' | tail -n 1)
         echo "$WRITE_OUTPUT"
         
-        WRITE_SPEED=$(echo "$WRITE_OUTPUT" | awk '{for(i=1; i<=NF; i++) { if($i ~ /B\/s/) { print $(i-1) } } }')
+        # EXTRAÇÃO: Normaliza a velocidade para MB/s
+        WRITE_SPEED_MBPS=$(extract_speed_mbps "$WRITE_OUTPUT")
 
         # Armazena apenas se for o disco raiz (/)
         if [ "$mountpoint" = "/" ]; then
-            DISK_ROOT_WRITE_SPEEDS+=("$WRITE_SPEED")
+            DISK_ROOT_WRITE_SPEEDS+=("$WRITE_SPEED_MBPS")
         fi
 
         if [ $(id -u) -eq 0 ]; then
@@ -209,14 +294,16 @@ function run_io_test() {
 
         # --- Teste de Leitura ---
         echo "Testando Leitura..."
-        READ_OUTPUT=$(dd if="${test_file}" of=/dev/null bs=1M count="${FILE_SIZE_MB}" status=progress 2>&1 | tail -n 1)
+        # CORREÇÃO DE DD: Captura APENAS a linha de resumo (onde está a velocidade final)
+        READ_OUTPUT=$(dd if="${test_file}" of=/dev/null bs=1M count="${FILE_SIZE_MB}" 2>&1 | grep 'copied' | tail -n 1)
         echo "$READ_OUTPUT"
 
-        READ_SPEED=$(echo "$READ_OUTPUT" | awk '{for(i=1; i<=NF; i++) { if($i ~ /B\/s/) { print $(i-1) } } }')
+        # EXTRAÇÃO: Normaliza a velocidade para MB/s
+        READ_SPEED_MBPS=$(extract_speed_mbps "$READ_OUTPUT")
         
         # Armazena apenas se for o disco raiz (/)
         if [ "$mountpoint" = "/" ]; then
-            DISK_ROOT_READ_SPEEDS+=("$READ_SPEED")
+            DISK_ROOT_READ_SPEEDS+=("$READ_SPEED_MBPS")
         fi
 
         rm -f "${test_file}"
@@ -245,6 +332,9 @@ function test_all_disk_io() {
 }
 
 function calculate_and_display_averages() {
+    # --------------------------------------------------
+    # Display human-readable averages
+    # --------------------------------------------------
     echo ""
     echo "=================================================="
     echo "### 📊 RESULTADOS FINAIS - MÉDIA DE $TEST_ROUNDS RODADAS ###"
@@ -254,14 +344,14 @@ function calculate_and_display_averages() {
     AVG_CPU_MULTI=$(calculate_average "${CPU_MULTI_TIMES[@]}")
     AVG_CPU_SINGLE=$(calculate_average "${CPU_SINGLE_TIMES[@]}")
     echo "🧠 CPU Média:"
-    echo "   Multi-Core: ${AVG_CPU_MULTI} segundos (Tempo Total)"
-    echo "   Single-Core: ${AVG_CPU_SINGLE} segundos (Velocidade Pura)"
+    echo "   Multi-Core: ${AVG_CPU_MULTI} segundos (Tempo Total)"
+    echo "   Single-Core: ${AVG_CPU_SINGLE} segundos (Velocidade Pura)"
     echo "--------------------------------------------------"
 
     # Memória
     AVG_RAM_WRITE=$(calculate_average "${RAM_WRITE_SPEEDS[@]}")
     echo "💡 Memória RAM Média:"
-    echo "   Escrita Sequencial: ${AVG_RAM_WRITE} MB/s"
+    echo "   Escrita Sequencial: ${AVG_RAM_WRITE} MB/s"
     echo "--------------------------------------------------"
 
     # Disco (Apenas Root como exemplo de média)
@@ -269,18 +359,49 @@ function calculate_and_display_averages() {
         AVG_DISK_ROOT_WRITE=$(calculate_average "${DISK_ROOT_WRITE_SPEEDS[@]}")
         AVG_DISK_ROOT_READ=$(calculate_average "${DISK_ROOT_READ_SPEEDS[@]}")
         echo "💾 Disco (Ponto de Montagem Raiz '/') Média:"
-        echo "   Escrita (Root /): ${AVG_DISK_ROOT_WRITE} MB/s"
-        echo "   Leitura (Root /): ${AVG_DISK_ROOT_READ} MB/s"
+        echo "   Escrita (Root /): ${AVG_DISK_ROOT_WRITE} MB/s"
+        echo "   Leitura (Root /): ${AVG_DISK_ROOT_READ} MB/s"
         echo "--------------------------------------------------"
     else
         echo "💾 Disco: Média do disco raiz '/' não disponível (ponto de montagem não detectado)."
         echo "--------------------------------------------------"
     fi
     echo ""
+
+    # --------------------------------------------------
+    # NOVO: Bloco para facilitar o parsing da API
+    # ATUALIZADO: Adiciona OS_INFO e SCRIPT_TARGET
+    # --------------------------------------------------
+    echo "=================================================="
+    echo "### 🤖 MACHINE_READABLE_DATA (Para Parsing de Log) ###"
+    
+    # Metadados de Sistema
+    echo "HOST_NAME: $LOCAL_HOSTNAME"
+    echo "OS_INFO: $OS_INFO"
+    echo "SCRIPT_TARGET: $SCRIPT_TARGET"
+
+    # CPU
+    echo "CPU_MULTI_AVG_S: ${AVG_CPU_MULTI}"
+    echo "CPU_SINGLE_AVG_S: ${AVG_CPU_SINGLE}"
+
+    # Memória
+    echo "RAM_WRITE_AVG_MBPS: ${AVG_RAM_WRITE}"
+
+    # Disco (Root)
+    if [ ${#DISK_ROOT_WRITE_SPEEDS[@]} -gt 0 ]; then
+        # Escrita de Disco
+        echo "DISK_ROOT_WRITE_AVG_MBPS: ${AVG_DISK_ROOT_WRITE}"
+        echo "DISK_ROOT_READ_AVG_MBPS: ${AVG_DISK_ROOT_READ}"
+    else
+        # Valores zero/padrão para quando o disco raiz não é testado ou dados estão vazios
+        echo "DISK_ROOT_WRITE_AVG_MBPS: 0.000"
+        echo "DISK_ROOT_READ_AVG_MBPS: 0.000"
+    fi
+    echo "=================================================="
+    echo ""
 }
 
-# --- Função de Upload ---
-
+# FUNÇÃO ATUALIZADA: Usa 'jq' para parsing de JSON robusto, se disponível
 function upload_log() {
     # ATUALIZADO: O redirecionamento de log agora é parado ANTES de chamar esta função.
     
@@ -289,7 +410,12 @@ function upload_log() {
     echo "Arquivo de log a ser enviado: $LOG_FILE"
     echo "Enviando para: $API_URL"
 
-    # Lê o conteúdo do arquivo
+    # Checa se 'jq' está instalado
+    JQ_AVAILABLE=0
+    if command -v jq &> /dev/null; then
+        JQ_AVAILABLE=1
+    fi
+
     LOG_CONTENT=$(cat "$LOG_FILE")
 
     # URL-encode do conteúdo do log usando perl.
@@ -305,26 +431,30 @@ function upload_log() {
     if [ $? -eq 0 ]; then
         echo "✅ Upload de log concluído."
         
-        # Busca por 'url_json' e 'url_txt' na nova resposta JSON da API.
-        URL_JSON=$(echo "$UPLOAD_RESPONSE" | grep -o '"url_json":"[^"]*"' | sed 's/"url_json":"//;s/"//')
-        URL_TXT=$(echo "$UPLOAD_RESPONSE" | grep -o '"url_txt":"[^"]*"' | sed 's/"url_txt":"//;s/"//')
-
-        if [ ! -z "$URL_JSON" ]; then
-            # Limpa o URL removendo qualquer barra invertida remanescente
+        if [ $JQ_AVAILABLE -eq 1 ]; then
+            echo "INFO: Usando 'jq' para parsing de JSON."
+            URL_JSON=$(echo "$UPLOAD_RESPONSE" | jq -r '.url_json')
+            URL_TXT=$(echo "$UPLOAD_RESPONSE" | jq -r '.url_txt')
+            CLEAN_URL_JSON="$URL_JSON"
+            CLEAN_URL_TXT="$URL_TXT"
+        else
+            echo "AVISO: 'jq' não encontrado. Usando método de extração frágil (grep/sed)."
+            URL_JSON=$(echo "$UPLOAD_RESPONSE" | grep -o '"url_json":"[^"]*"' | sed 's/"url_json":"//;s/"//')
+            URL_TXT=$(echo "$UPLOAD_RESPONSE" | grep -o '"url_txt":"[^"]*"' | sed 's/"url_txt":"//;s/"//')
             CLEAN_URL_JSON=$(echo "$URL_JSON" | sed 's/\\//g')
             CLEAN_URL_TXT=$(echo "$URL_TXT" | sed 's/\\//g')
+        fi
 
+        if [ ! -z "$CLEAN_URL_JSON" ]; then
             echo ""
             echo "🔗 LINK PARA DADOS ESTRUTURADOS (JSON): $CLEAN_URL_JSON"
             echo "🔗 LINK PARA LOG BRUTO (TXT): $CLEAN_URL_TXT"
             
-            # --- BLOCO ATUALIZADO ---
             echo ""
             echo "============================================================"
             echo "📊 LINK PARA O DASHBOARD DE VISUALIZAÇÃO:"
             echo "${VIEWER_URL}?json=${CLEAN_URL_JSON}&txt=${CLEAN_URL_TXT}"
             echo "============================================================"
-            # --- FIM DO BLOCO ATUALIZADO ---
             
         else
             echo "❌ ERRO: Falha ao extrair URLs da resposta da API. Resposta bruta:"
@@ -348,7 +478,7 @@ start_logging
 # 3. Execução dos Testes
 print_performance_table
 collect_system_info
-test_cpu_heavy # Chamando a função intensiva
+test_cpu_heavy
 test_memory
 test_all_disk_io
 
@@ -363,13 +493,12 @@ echo "O log completo do teste foi salvo em: $LOG_FILE"
 # Para o logging (volta ao stdout normal) para fazer a pergunta
 exec >&3 2>&1 
 
-# ADICIONADO: Pequeno 'sleep' para garantir que o buffer do 'tee'
-# (especialmente a linha "Testes Concluídos") seja impresso ANTES do prompt.
+# Pequeno 'sleep' para garantir que o buffer do 'tee' seja impresso ANTES do prompt.
 sleep 0.5
 
 echo ""
 echo "============================================================"
-echo "⚠️  PERMISSÃO PARA UPLOAD PÚBLICO"
+echo "⚠️  PERMISSÃO PARA UPLOAD PÚBLICO"
 echo "O log deste teste (arquivo $LOG_FILE) pode ser enviado para $API_URL"
 echo "Isso tornará os resultados publicamente visíveis."
 echo ""
@@ -377,13 +506,14 @@ echo "Você deseja enviar este log? (s/n)"
 read -p "> " user_consent
 
 if [[ "$user_consent" == "s" || "$user_consent" == "S" ]]; then
-    # O usuário consentiu.
     upload_log
 else
     echo "Upload cancelado pelo usuário."
     echo "Seu log completo está salvo localmente em: $LOG_FILE"
 fi
 
-
 # 7. Fecha o descritor de arquivo
 exec 3>&-
+
+# Remove o trap para evitar chamadas de cleanup desnecessárias após a execução normal
+trap - SIGINT SIGTERM SIGHUP
