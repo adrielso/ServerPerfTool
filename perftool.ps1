@@ -32,7 +32,7 @@ $LOG_FILE = "performance_log_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 # Variáveis globais para armazenar metadados
 $LOCAL_HOSTNAME = $env:COMPUTERNAME
 $global:OS_INFO = ""
-$global:SCRIPT_TARGET = "Windows (PowerShell)" 
+$global:SCRIPT_TARGET = "Windows (PowerShell)"
 $global:CPU_MODEL = ""
 $global:TOTAL_RAM_HUMAN = ""
 $global:TOTAL_RAM_MB = 0
