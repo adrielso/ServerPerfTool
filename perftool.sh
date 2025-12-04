@@ -23,7 +23,7 @@ FILE_NAME="testfile_${FILE_SIZE_MB}MB"
 
 # Teste de CPU
 # Valor ajustado para 600 iterações para garantir um tempo de execução estável e preciso.
-ITERATIONS=600
+ITERATIONS=1000
 CPU_CORES=$(nproc)
 
 # Teste de Memória (Memória Compartilhada / RAM)
