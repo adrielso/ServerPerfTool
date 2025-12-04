@@ -6,7 +6,7 @@
 # jq para parsing robusto de JSON, se disponível, e coleta de metadados OS/Target.
 
 # --- CORREÇÃO DE LOCALE ---
-# FORÇA O PONTO (.) COMO SEPARADOR DECIMAL PARA GARANTIR CÁLCULOS CORRETOS NO AWK.
+# FORÇA O PONTO (.) COMO SEPARADOR DECIMAL PARA GARANTIR CÁLCULOS CORRETOS NO AWK E PARA A API.
 export LC_NUMERIC="C"
 
 # --- CONFIGURAÇÕES DO SERVIÇO de UPLOAD ---
@@ -33,6 +33,8 @@ FILE_SIZE_MEM_MB=512
 LOG_FILE="performance_log_$(date +%Y%m%d_%H%M%S).log"
 
 # Variáveis globais para armazenar metadados
+CPU_MODEL=""
+TOTAL_RAM=""
 LOCAL_HOSTNAME=""
 OS_INFO=""
 SCRIPT_TARGET="Linux" # Variável de filtro para distinguir ambientes (Linux vs. Windows)
@@ -45,7 +47,7 @@ DISK_ROOT_WRITE_SPEEDS=()
 DISK_ROOT_READ_SPEEDS=()
 
 # --- Função de Limpeza de Emergência (Clean-up) ---
-# Garante que arquivos temporários sejam removidos em caso de interrupção (Ctrl+C).
+# 🟢 CORREÇÃO: Limpeza de caracteres invisíveis no bloco IF/THEN.
 function cleanup() {
     echo ""
     echo "⚠️ SCRIPT INTERROMPIDO. Limpando arquivos temporários..." >&2 # Direciona para stderr
@@ -63,7 +65,7 @@ function cleanup() {
 # Configura o trap para chamar 'cleanup' em sinais de interrupção, etc.
 trap cleanup SIGINT SIGTERM SIGHUP
 
-# --- Funções Auxiliares (Não alteradas) ---
+# --- Funções Auxiliares ---
 
 # Função auxiliar para calcular a média de um array de números de ponto flutuante
 function calculate_average() {
@@ -75,6 +77,15 @@ function calculate_average() {
     # Usa 'awk' para somar todos os valores e dividir, formatando para três casas decimais.
     # ARGV[1:] pula o nome do script (ARGV[0]) e trata o restante como dados.
     awk "BEGIN { sum = 0; count = 0; for (i=1; i<=ARGC; i++) { sum += ARGV[i]; count++; } printf \"%.3f\", sum / count }" "${results[@]}"
+}
+
+# 🟢 NOVA FUNÇÃO: Junta elementos de um array em uma string separada por vírgula.
+# Isso é necessário para gerar os campos RAW_... da API.
+function join_array_to_string() {
+    local array=("$@")
+    # Define o separador interno (IFS) como vírgula APENAS para esta subshell
+    local IFS=','
+    echo "${array[*]}"
 }
 
 # FUNÇÃO ATUALIZADA: Extrai a velocidade de I/O e normaliza para MB/s
@@ -178,7 +189,7 @@ function collect_system_info() {
         if [ "$TYPE" = "disk" ]; then
             echo "• DISCO: $NAME ($MODEL) - Tamanho: $SIZE"
         elif [ "$TYPE" = "part" ] && [ ! -z "$MOUNTPOINT" ] && [ "$MOUNTPOINT" != "[SWAP]" ]; then
-            echo "  └─ Montagem: $MOUNTPOINT - Partição: $NAME"
+            echo "  └─ Montagem: $MOUNTPOINT - Partição: $NAME"
         fi
     done
     
@@ -344,14 +355,14 @@ function calculate_and_display_averages() {
     AVG_CPU_MULTI=$(calculate_average "${CPU_MULTI_TIMES[@]}")
     AVG_CPU_SINGLE=$(calculate_average "${CPU_SINGLE_TIMES[@]}")
     echo "🧠 CPU Média:"
-    echo "   Multi-Core: ${AVG_CPU_MULTI} segundos (Tempo Total)"
-    echo "   Single-Core: ${AVG_CPU_SINGLE} segundos (Velocidade Pura)"
+    echo "   Multi-Core: ${AVG_CPU_MULTI} segundos (Tempo Total)"
+    echo "   Single-Core: ${AVG_CPU_SINGLE} segundos (Velocidade Pura)"
     echo "--------------------------------------------------"
 
     # Memória
     AVG_RAM_WRITE=$(calculate_average "${RAM_WRITE_SPEEDS[@]}")
     echo "💡 Memória RAM Média:"
-    echo "   Escrita Sequencial: ${AVG_RAM_WRITE} MB/s"
+    echo "   Escrita Sequencial: ${AVG_RAM_WRITE} MB/s"
     echo "--------------------------------------------------"
 
     # Disco (Apenas Root como exemplo de média)
@@ -359,8 +370,8 @@ function calculate_and_display_averages() {
         AVG_DISK_ROOT_WRITE=$(calculate_average "${DISK_ROOT_WRITE_SPEEDS[@]}")
         AVG_DISK_ROOT_READ=$(calculate_average "${DISK_ROOT_READ_SPEEDS[@]}")
         echo "💾 Disco (Ponto de Montagem Raiz '/') Média:"
-        echo "   Escrita (Root /): ${AVG_DISK_ROOT_WRITE} MB/s"
-        echo "   Leitura (Root /): ${AVG_DISK_ROOT_READ} MB/s"
+        echo "   Escrita (Root /): ${AVG_DISK_ROOT_WRITE} MB/s"
+        echo "   Leitura (Root /): ${AVG_DISK_ROOT_READ} MB/s"
         echo "--------------------------------------------------"
     else
         echo "💾 Disco: Média do disco raiz '/' não disponível (ponto de montagem não detectado)."
@@ -369,8 +380,24 @@ function calculate_and_display_averages() {
     echo ""
 
     # --------------------------------------------------
+    # CRIAÇÃO DOS ARRAYS BRUTOS PARA O PARSING DA API
+    # --------------------------------------------------
+    RAW_CPU_MULTI_TIMES_STR=$(join_array_to_string "${CPU_MULTI_TIMES[@]}")
+    RAW_CPU_SINGLE_TIMES_STR=$(join_array_to_string "${CPU_SINGLE_TIMES[@]}")
+    RAW_RAM_WRITE_SPEEDS_STR=$(join_array_to_string "${RAM_WRITE_SPEEDS[@]}")
+
+    if [ ${#DISK_ROOT_WRITE_SPEEDS[@]} -gt 0 ]; then
+        RAW_DISK_WRITE_SPEEDS_STR=$(join_array_to_string "${DISK_ROOT_WRITE_SPEEDS[@]}")
+        RAW_DISK_READ_SPEEDS_STR=$(join_array_to_string "${DISK_ROOT_READ_SPEEDS[@]}")
+    else
+        # Se os testes de disco falharem, usa o fallback de '0.000'
+        RAW_DISK_WRITE_SPEEDS_STR="0.000"
+        RAW_DISK_READ_SPEEDS_STR="0.000"
+    fi
+
+
+    # --------------------------------------------------
     # NOVO: Bloco para facilitar o parsing da API
-    # ATUALIZADO: Adiciona OS_INFO e SCRIPT_TARGET
     # --------------------------------------------------
     echo "=================================================="
     echo "### 🤖 MACHINE_READABLE_DATA (Para Parsing de Log) ###"
@@ -379,24 +406,26 @@ function calculate_and_display_averages() {
     echo "HOST_NAME: $LOCAL_HOSTNAME"
     echo "OS_INFO: $OS_INFO"
     echo "SCRIPT_TARGET: $SCRIPT_TARGET"
-
-    # CPU
+    # Informações de CPU/RAM (Adicionadas para a API)
+    echo "CPU_MODEL: $CPU_MODEL"
+    echo "RAM_TOTAL: $TOTAL_RAM" # Mantendo RAM_TOTAL no formato humano para a API
+    
+    # Médias
     echo "CPU_MULTI_AVG_S: ${AVG_CPU_MULTI}"
     echo "CPU_SINGLE_AVG_S: ${AVG_CPU_SINGLE}"
-
-    # Memória
     echo "RAM_WRITE_AVG_MBPS: ${AVG_RAM_WRITE}"
 
     # Disco (Root)
-    if [ ${#DISK_ROOT_WRITE_SPEEDS[@]} -gt 0 ]; then
-        # Escrita de Disco
-        echo "DISK_ROOT_WRITE_AVG_MBPS: ${AVG_DISK_ROOT_WRITE}"
-        echo "DISK_ROOT_READ_AVG_MBPS: ${AVG_DISK_ROOT_READ}"
-    else
-        # Valores zero/padrão para quando o disco raiz não é testado ou dados estão vazios
-        echo "DISK_ROOT_WRITE_AVG_MBPS: 0.000"
-        echo "DISK_ROOT_READ_AVG_MBPS: 0.000"
-    fi
+    echo "DISK_ROOT_WRITE_AVG_MBPS: ${AVG_DISK_ROOT_WRITE}"
+    echo "DISK_ROOT_READ_AVG_MBPS: ${AVG_DISK_ROOT_READ}"
+    
+    # 🟢 DADOS BRUTOS (ARRAYS): CORRIGIDOS E INCLUÍDOS
+    echo "RAW_CPU_MULTI_S: ${RAW_CPU_MULTI_TIMES_STR}"
+    echo "RAW_CPU_SINGLE_S: ${RAW_CPU_SINGLE_TIMES_STR}"
+    echo "RAW_RAM_WRITE_MBPS: ${RAW_RAM_WRITE_SPEEDS_STR}"
+    echo "RAW_DISK_WRITE_MBPS: ${RAW_DISK_WRITE_SPEEDS_STR}"
+    echo "RAW_DISK_READ_MBPS: ${RAW_DISK_READ_SPEEDS_STR}"
+
     echo "=================================================="
     echo ""
 }
@@ -498,7 +527,7 @@ sleep 0.5
 
 echo ""
 echo "============================================================"
-echo "⚠️  PERMISSÃO PARA UPLOAD PÚBLICO"
+echo "⚠️  PERMISSÃO PARA UPLOAD PÚBLICO"
 echo "O log deste teste (arquivo $LOG_FILE) pode ser enviado para $API_URL"
 echo "Isso tornará os resultados publicamente visíveis."
 echo ""
