@@ -23,7 +23,7 @@ FILE_NAME="testfile_${FILE_SIZE_MB}MB"
 
 # Teste de CPU
 # Valor ajustado para 600 iterações para garantir um tempo de execução estável e preciso.
-ITERATIONS=1000
+ITERATIONS=600
 CPU_CORES=$(nproc)
 
 # Teste de Memória (Memória Compartilhada / RAM)
@@ -46,8 +46,12 @@ RAM_WRITE_SPEEDS=()
 DISK_ROOT_WRITE_SPEEDS=()
 DISK_ROOT_READ_SPEEDS=()
 
+# Espaço mínimo necessário para o teste de I/O de disco
+# (FILE_SIZE_MB = 1024MB) + 200MB de buffer de segurança.
+REQUIRED_SPACE_MB=$((FILE_SIZE_MB + 200))
+
+
 # --- Função de Limpeza de Emergência (Clean-up) ---
-# 🟢 CORREÇÃO: Limpeza de caracteres invisíveis no bloco IF/THEN.
 function cleanup() {
     echo ""
     echo "⚠️ SCRIPT INTERROMPIDO. Limpando arquivos temporários..." >&2 # Direciona para stderr
@@ -79,7 +83,7 @@ function calculate_average() {
     awk "BEGIN { sum = 0; count = 0; for (i=1; i<=ARGC; i++) { sum += ARGV[i]; count++; } printf \"%.3f\", sum / count }" "${results[@]}"
 }
 
-# 🟢 NOVA FUNÇÃO: Junta elementos de um array em uma string separada por vírgula.
+# NOVA FUNÇÃO: Junta elementos de um array em uma string separada por vírgula.
 # Isso é necessário para gerar os campos RAW_... da API.
 function join_array_to_string() {
     local array=("$@")
@@ -121,8 +125,7 @@ function extract_speed_mbps() {
     }'
 }
 
-
-# --- Funções de Logging e Tabela (Inalteradas) ---
+# --- Funções de Logging e Tabela ---
 
 # Redireciona toda a saída (stdout e stderr) para o arquivo de log e para a tela
 function start_logging() {
@@ -355,14 +358,14 @@ function calculate_and_display_averages() {
     AVG_CPU_MULTI=$(calculate_average "${CPU_MULTI_TIMES[@]}")
     AVG_CPU_SINGLE=$(calculate_average "${CPU_SINGLE_TIMES[@]}")
     echo "🧠 CPU Média:"
-    echo "   Multi-Core: ${AVG_CPU_MULTI} segundos (Tempo Total)"
-    echo "   Single-Core: ${AVG_CPU_SINGLE} segundos (Velocidade Pura)"
+    echo "    Multi-Core: ${AVG_CPU_MULTI} segundos (Tempo Total)"
+    echo "    Single-Core: ${AVG_CPU_SINGLE} segundos (Velocidade Pura)"
     echo "--------------------------------------------------"
 
     # Memória
     AVG_RAM_WRITE=$(calculate_average "${RAM_WRITE_SPEEDS[@]}")
     echo "💡 Memória RAM Média:"
-    echo "   Escrita Sequencial: ${AVG_RAM_WRITE} MB/s"
+    echo "    Escrita Sequencial: ${AVG_RAM_WRITE} MB/s"
     echo "--------------------------------------------------"
 
     # Disco (Apenas Root como exemplo de média)
@@ -370,8 +373,8 @@ function calculate_and_display_averages() {
         AVG_DISK_ROOT_WRITE=$(calculate_average "${DISK_ROOT_WRITE_SPEEDS[@]}")
         AVG_DISK_ROOT_READ=$(calculate_average "${DISK_ROOT_READ_SPEEDS[@]}")
         echo "💾 Disco (Ponto de Montagem Raiz '/') Média:"
-        echo "   Escrita (Root /): ${AVG_DISK_ROOT_WRITE} MB/s"
-        echo "   Leitura (Root /): ${AVG_DISK_ROOT_READ} MB/s"
+        echo "    Escrita (Root /): ${AVG_DISK_ROOT_WRITE} MB/s"
+        echo "    Leitura (Root /): ${AVG_DISK_ROOT_READ} MB/s"
         echo "--------------------------------------------------"
     else
         echo "💾 Disco: Média do disco raiz '/' não disponível (ponto de montagem não detectado)."
@@ -419,7 +422,7 @@ function calculate_and_display_averages() {
     echo "DISK_ROOT_WRITE_AVG_MBPS: ${AVG_DISK_ROOT_WRITE}"
     echo "DISK_ROOT_READ_AVG_MBPS: ${AVG_DISK_ROOT_READ}"
     
-    # 🟢 DADOS BRUTOS (ARRAYS): CORRIGIDOS E INCLUÍDOS
+    # DADOS BRUTOS (ARRAYS): CORRIGIDOS E INCLUÍDOS
     echo "RAW_CPU_MULTI_S: ${RAW_CPU_MULTI_TIMES_STR}"
     echo "RAW_CPU_SINGLE_S: ${RAW_CPU_SINGLE_TIMES_STR}"
     echo "RAW_RAM_WRITE_MBPS: ${RAW_RAM_WRITE_SPEEDS_STR}"
@@ -495,11 +498,45 @@ function upload_log() {
     echo "--- Fim do Envio ---"
 }
 
+# --- NOVA FUNÇÃO: VERIFICA ESPAÇO LIVRE ---
+function check_free_space() {
+    # Assume que o teste será feito no ponto de montagem raiz (/) para o I/O de disco.
+    local mountpoint="/"
+
+    echo "--- 🔍 Verificando Espaço em Disco Disponível no Mountpoint ${mountpoint} ---"
+    
+    # Obtém o espaço livre no ponto de montagem (em Megabytes)
+    # Coluna 4 (Available) de df -m
+    AVAILABLE_SPACE_MB=$(df -m "${mountpoint}" 2>/dev/null | tail -n 1 | awk '{print $4}')
+
+    # Caso o df falhe ou o resultado seja vazio, assume que não há espaço ou o mountpoint não é acessível.
+    if [ -z "$AVAILABLE_SPACE_MB" ]; then
+        echo "❌ ERRO CRÍTICO: Não foi possível determinar o espaço livre em ${mountpoint}. Abortando."
+        return 1
+    fi
+    
+    if [ "$AVAILABLE_SPACE_MB" -lt "$REQUIRED_SPACE_MB" ]; then
+        echo "❌ ERRO CRÍTICO: Espaço em disco insuficiente em '${mountpoint}'. A execução foi abortada."
+        echo "Espaço necessário para o arquivo de I/O (${FILE_SIZE_MB}MB) + buffer: ${REQUIRED_SPACE_MB}MB"
+        echo "Espaço disponível detectado: ${AVAILABLE_SPACE_MB}MB"
+        return 1
+    fi
+
+    echo "✅ Espaço em disco suficiente (${AVAILABLE_SPACE_MB}MB disponível). Continuando..."
+    echo "----------------------------------------------------"
+    return 0
+}
+
 
 # --- EXECUÇÃO PRINCIPAL ---
 
 # 1. Abre um novo descritor de arquivo (fd 3) para o stdout original
 exec 3>&1
+
+# 🟢 NOVO: VERIFICA ESPAÇO ANTES DE TUDO (MESMO ANTES DO LOGGING)
+if ! check_free_space; then
+    cleanup # Limpa arquivos temporários (se houver, mas não deve haver) e sai
+fi
 
 # 2. Inicia o logging (redireciona stdout e stderr para o log e tela)
 start_logging
